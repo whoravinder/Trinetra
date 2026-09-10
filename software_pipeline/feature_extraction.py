@@ -1,31 +1,29 @@
 import numpy as np
 from scipy.signal import stft
 from scipy.fft import fft
+from scipy.constants import c
+
 
 class FeatureExtractor:
-    def __init__(self, fs=20e6, n_fft=256):
+    def __init__(self, fs=20e6, n_fft=256, carrier_freq=6e9, element_spacing=None):
         self.fs = fs
         self.n_fft = n_fft
+        self.carrier_freq = carrier_freq
+        self.wavelength = c / carrier_freq
+        self.element_spacing = element_spacing if element_spacing is not None else self.wavelength / 2
 
     def range_profile(self, rx_signal):
         spectrum = np.abs(fft(rx_signal, n=self.n_fft))
-        spectrum = spectrum[:self.n_fft // 2]
+        spectrum = spectrum[: self.n_fft // 2]
         return spectrum / max(np.max(spectrum), 1e-12)
 
     def doppler_spectrum(self, rx_signal, window=128, overlap=64):
-        f, t, Zxx = stft(rx_signal, fs=self.fs, nperseg=window, noverlap=overlap)
+        _, _, Zxx = stft(rx_signal, fs=self.fs, nperseg=window, noverlap=overlap)
         doppler_map = np.abs(Zxx)
         return doppler_map / max(np.max(doppler_map), 1e-12)
 
-    def doa_from_ula(self, rx_array, wavelength=0.03, element_spacing=None):
-        """Estimate DOA from a uniform linear array using conventional beamforming.
-
-        rx_array: complex array shaped [num_antennas, num_samples].
-        Returns angle in degrees over [-90, 90].
-
-        This is a practical baseline. For multiple targets/noisy environments,
-        MUSIC/ESPRIT or a learned array-processing stage can be added later.
-        """
+    def doa_beamforming_spectrum(self, rx_array, angles=None):
+        """Conventional beamforming for a uniform linear antenna array."""
         x = np.asarray(rx_array, dtype=np.complex128)
         if x.ndim != 2:
             raise ValueError("rx_array must have shape [num_antennas, num_samples]")
@@ -33,18 +31,24 @@ class FeatureExtractor:
         if m < 2:
             raise ValueError("At least 2 antenna elements are required for DOA estimation")
 
-        d = element_spacing if element_spacing is not None else wavelength / 2
-        angles = np.linspace(-90.0, 90.0, 181)
-        # Average spatial covariance across fast-time samples.
-        R = (x @ x.conj().T) / x.shape[1]
-        R = (R + R.conj().T) / 2
-        powers = np.empty_like(angles)
-        element_idx = np.arange(m)
-        for i, angle in enumerate(np.deg2rad(angles)):
-            phase = 2.0 * np.pi * d * element_idx * np.sin(angle) / wavelength
-            steering = np.exp(-1j * phase)
-            powers[i] = np.real(np.conj(steering) @ R @ steering)
+        if angles is None:
+            angles = np.linspace(-90.0, 90.0, 181)
+        angles = np.asarray(angles, dtype=np.float64)
 
+        R = (x @ x.conj().T) / max(x.shape[1], 1)
+        R = (R + R.conj().T) / 2
+        element_idx = np.arange(m)
+        powers = np.empty(len(angles), dtype=np.float64)
+
+        for i, angle in enumerate(np.deg2rad(angles)):
+            phase = 2.0 * np.pi * self.element_spacing * element_idx * np.sin(angle) / self.wavelength
+            steering = np.exp(-1j * phase)
+            powers[i] = max(np.real(np.conj(steering) @ R @ steering) / (m * m), 0.0)
+
+        return angles, powers
+
+    def doa_from_ula(self, rx_array):
+        angles, powers = self.doa_beamforming_spectrum(rx_array)
         return float(angles[int(np.argmax(powers))])
 
     def doa_one_hot(self, doa_deg, n_bins=180):
