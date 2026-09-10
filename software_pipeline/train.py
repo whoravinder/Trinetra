@@ -32,25 +32,30 @@ def set_seed(seed=SEED):
 
 
 class UAVDataset(Dataset):
-    """Precomputed UAS signal features with array-derived DOA and no label leakage."""
+    """Precomputed range, Doppler and array-DOA features with no label leakage."""
 
     def __init__(self, files):
         if not files:
             raise FileNotFoundError("No dataset files found.")
 
-        self.X, self.y = [], []
-        self.fe = FeatureExtractor(carrier_freq=CARRIER_FREQ)
+        self.X, self.TX, self.y = [], [], []
+        self.fe = FeatureExtractor(carrier_freq=CARRIER_FREQ, n_subcarriers=128, n_symbols=14)
 
         for f in files:
             with h5py.File(f, "r") as hf:
                 x = hf["X"][:]
+                tx = hf["TX"][:]
                 y = hf["y"][:]
             if x.ndim != 3 or x.shape[1] != N_ANTENNAS:
                 raise ValueError(f"{f}: expected X=[samples,{N_ANTENNAS},time], got {x.shape}")
+            if tx.ndim != 2 or len(tx) != len(x):
+                raise ValueError(f"{f}: expected TX=[samples,time], got {tx.shape}")
             self.X.append(x)
+            self.TX.append(tx)
             self.y.append(y.astype(np.float32))
 
         self.X = np.concatenate(self.X, axis=0)
+        self.TX = np.concatenate(self.TX, axis=0)
         self.y_raw = np.concatenate(self.y, axis=0)
         self.y = self.y_raw.copy()
         self.y[:, 0] /= RANGE_MAX
@@ -59,20 +64,16 @@ class UAVDataset(Dataset):
 
         n = len(self.X)
         self.range_features = np.empty((n, 128), dtype=np.float32)
-        self.doppler_features = None
+        self.doppler_features = np.empty((n, 128), dtype=np.float32)
         self.doa_features = np.empty((n, 181), dtype=np.float32)
         self.estimated_doa = np.empty(n, dtype=np.float32)
 
-        print(f"Precomputing signal features for {n} samples...")
-        for i, rx_array in enumerate(self.X):
-            # Preserve the original range/Doppler path on one calibrated reference channel.
-            feats = self.fe.extract_features(rx_array[0], rx_array)
+        print(f"Precomputing signal features for {n:,} samples...")
+        for i, (rx_array, tx_signal) in enumerate(zip(self.X, self.TX)):
+            feats = self.fe.extract_features(rx_array[0], rx_array, tx_signal)
             self.range_features[i] = feats["range"]
-            if self.doppler_features is None:
-                self.doppler_features = np.empty((n, *feats["doppler"].shape), dtype=np.float32)
             self.doppler_features[i] = feats["doppler"]
             self.doa_features[i] = feats["doa"]
-            # Store normalized DOA because dashboard.py converts it back to degrees.
             self.estimated_doa[i] = feats["doa_deg"] / DOA_MAX
 
     def __len__(self):
@@ -110,7 +111,7 @@ def train_model(files, epochs=EPOCHS, batch_size=BATCH_SIZE, lr=LR):
     best_loss = float("inf")
 
     print(f"Device: {device}")
-    print(f"Train: {len(train_set)} | Test: {len(test_set)}")
+    print(f"Train: {len(train_set):,} | Test: {len(test_set):,}")
 
     for epoch in range(epochs):
         model.train()
@@ -148,5 +149,5 @@ def train_model(files, epochs=EPOCHS, batch_size=BATCH_SIZE, lr=LR):
 
 if __name__ == "__main__":
     files = sorted(glob.glob("datasets/adyant_isac_*.h5"))
-    print(f"Training on {len(files)} scenario datasets: {files}")
+    print(f"Training on {len(files)} dataset files: {files}")
     train_model(files)
