@@ -47,18 +47,16 @@ class UAVDataset(Dataset):
                 y = hf["y"][:]
             if x.ndim != 3 or x.shape[1] != N_ANTENNAS:
                 raise ValueError(f"{f}: expected X=[samples,{N_ANTENNAS},time], got {x.shape}")
-            y = y.astype(np.float32).copy()
-            y[:, 0] /= RANGE_MAX
-            y[:, 1] /= VEL_MAX
-            y[:, 2] /= DOA_MAX
             self.X.append(x)
-            self.y.append(y)
+            self.y.append(y.astype(np.float32))
 
         self.X = np.concatenate(self.X, axis=0)
-        self.y = np.concatenate(self.y, axis=0)
+        self.y_raw = np.concatenate(self.y, axis=0)
+        self.y = self.y_raw.copy()
+        self.y[:, 0] /= RANGE_MAX
+        self.y[:, 1] /= VEL_MAX
+        self.y[:, 2] /= DOA_MAX
 
-        # FFT/STFT/beamforming are deterministic, so compute them once rather
-        # than repeating signal processing every epoch.
         n = len(self.X)
         self.range_features = np.empty((n, 128), dtype=np.float32)
         self.doppler_features = None
@@ -67,16 +65,14 @@ class UAVDataset(Dataset):
 
         print(f"Precomputing signal features for {n} samples...")
         for i, rx_array in enumerate(self.X):
-            # Preserve the original range/Doppler path on one receiver channel.
+            # Preserve the original range/Doppler path on one calibrated reference channel.
             feats = self.fe.extract_features(rx_array[0], rx_array)
             self.range_features[i] = feats["range"]
             if self.doppler_features is None:
-                self.doppler_features = np.empty(
-                    (n, *feats["doppler"].shape), dtype=np.float32
-                )
+                self.doppler_features = np.empty((n, *feats["doppler"].shape), dtype=np.float32)
             self.doppler_features[i] = feats["doppler"]
             self.doa_features[i] = feats["doa"]
-            self.estimated_doa[i] = feats["doa_deg"] / DOA_MAX
+            self.estimated_doa[i] = feats["doa_deg"]
 
     def __len__(self):
         return len(self.y)
@@ -107,9 +103,7 @@ def train_model(files, epochs=EPOCHS, batch_size=BATCH_SIZE, lr=LR):
 
     model = UAVEstimator().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=3
-    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
     criterion = torch.nn.MSELoss()
     history = {"train_loss": [], "test_loss": []}
     best_loss = float("inf")
