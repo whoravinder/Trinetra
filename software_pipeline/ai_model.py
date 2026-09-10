@@ -18,22 +18,6 @@ class ResidualBlock1D(nn.Module):
         return torch.relu(out + identity)
 
 
-class ResidualBlock2D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.skip = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x):
-        identity = self.skip(x)
-        out = torch.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        return torch.relu(out + identity)
-
-
 class AttentionFusion(nn.Module):
     """Cross-modal attention over range, Doppler and DOA feature tokens."""
 
@@ -56,7 +40,7 @@ class AttentionFusion(nn.Module):
 
 
 class UAVEstimator(nn.Module):
-    """Multimodal UAS parameter estimator: range + Doppler + array DOA."""
+    """Multimodal UAS parameter estimator: matched-filter range + Doppler + array DOA."""
 
     def __init__(self):
         super().__init__()
@@ -65,15 +49,15 @@ class UAVEstimator(nn.Module):
             ResidualBlock1D(16, 32),
             nn.AdaptiveAvgPool1d(16),
         )
+        # Doppler is now a 1-D spectrum, so use a 1-D CNN rather than a 2-D image CNN.
         self.doppler_cnn = nn.Sequential(
-            ResidualBlock2D(1, 16),
-            ResidualBlock2D(16, 32),
-            nn.AdaptiveAvgPool2d((8, 8)),
+            ResidualBlock1D(1, 16),
+            ResidualBlock1D(16, 32),
+            nn.AdaptiveAvgPool1d(16),
         )
 
-        # 181 bins correspond directly to the -90..90 degree, 1-degree grid.
         self.range_proj = nn.Linear(32 * 16, 128)
-        self.doppler_proj = nn.Linear(32 * 8 * 8, 128)
+        self.doppler_proj = nn.Linear(32 * 16, 128)
         self.doa_proj = nn.Sequential(
             nn.Linear(181, 128),
             nn.ReLU(),
@@ -97,7 +81,7 @@ class UAVEstimator(nn.Module):
         d = self.doppler_proj(d)
         doa = self.doa_proj(doa_feat)
 
-        # Three tokens make attention meaningful: each token represents one modality.
+        # Three tokens make attention meaningful: one token per sensing modality.
         tokens = torch.stack([r, d, doa], dim=1)
         fused = self.fusion(tokens).mean(dim=1)
         return self.head(fused)
