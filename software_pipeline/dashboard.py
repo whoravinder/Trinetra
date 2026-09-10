@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader, random_split
 from ai_model import UAVEstimator
 from train import DOA_MAX, RANGE_MAX, SEED, UAVDataset, VEL_MAX
 
-
 OUTPUT_DIR = "results"
 
 
@@ -21,10 +20,7 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
         raise FileNotFoundError(f"Model not found: {model_file}. Run train.py first.")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print("Loading dataset and precomputing features...")
     dataset = UAVDataset(files)
-
-    # Use the same deterministic 80/20 split as training for an honest test report.
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     _, test_set = random_split(
@@ -32,7 +28,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     )
     loader = DataLoader(test_set, batch_size=64, shuffle=False)
 
-    print("Loading trained model...")
     model = UAVEstimator()
     model.load_state_dict(torch.load(model_file, map_location="cpu"))
     model.eval()
@@ -40,8 +35,7 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     preds, truths, doa_inputs = [], [], []
     with torch.no_grad():
         for r, d, doa, labels, estimated_doa in loader:
-            out = model(r, d, doa)
-            preds.append(out.numpy())
+            preds.append(model(r, d, doa).numpy())
             truths.append(labels.numpy())
             doa_inputs.append(estimated_doa.numpy())
 
@@ -49,7 +43,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     truths = np.concatenate(truths)
     doa_inputs = np.concatenate(doa_inputs) * DOA_MAX
 
-    # Convert normalized values back to physical units.
     preds[:, 0] *= RANGE_MAX
     preds[:, 1] *= VEL_MAX
     preds[:, 2] *= DOA_MAX
@@ -79,7 +72,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     print("\nFirst 10 test predictions:")
     print(df.head(10).to_string(index=False))
 
-    # 1. Prediction traces: ideal for a technical demonstration.
     fig, axs = plt.subplots(3, 1, figsize=(11, 9))
     items = [
         (truths[:, 0], preds[:, 0], "Range (m)", "True Range", "Model Range"),
@@ -98,7 +90,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     fig.savefig(os.path.join(OUTPUT_DIR, "prediction_traces.png"), dpi=180)
     plt.show()
 
-    # 2. DOA comparison: classical beamforming vs learned correction.
     plt.figure(figsize=(8, 6))
     plt.scatter(truths[:, 2], doa_inputs, s=12, alpha=0.45, label="Beamforming")
     plt.scatter(truths[:, 2], preds[:, 2], s=12, alpha=0.45, label="Neural model")
@@ -113,7 +104,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     plt.savefig(os.path.join(OUTPUT_DIR, "doa_comparison.png"), dpi=180)
     plt.show()
 
-    # 3. Range/velocity/DOA regression quality.
     fig, axs = plt.subplots(3, 1, figsize=(8, 14))
     for ax, true, pred, title, unit in [
         (axs[0], truths[:, 0], preds[:, 0], "Range: True vs Predicted", "m"),
@@ -132,7 +122,6 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     fig.savefig(os.path.join(OUTPUT_DIR, "regression_scatter.png"), dpi=180)
     plt.show()
 
-    # 4. 2D position proxy from range + DOA.
     true_x = truths[:, 0] * np.cos(np.deg2rad(truths[:, 2]))
     true_y = truths[:, 0] * np.sin(np.deg2rad(truths[:, 2]))
     pred_x = preds[:, 0] * np.cos(np.deg2rad(preds[:, 2]))
@@ -151,10 +140,8 @@ def evaluate_model(files, model_file="adyant_uav_estimator.pth"):
     plt.savefig(os.path.join(OUTPUT_DIR, "trajectory_proxy.png"), dpi=180)
     plt.show()
 
-    # 5. Training/validation curve, if produced by train.py.
-    history_file = "training_history.npz"
-    if os.path.exists(history_file):
-        history = np.load(history_file)
+    if os.path.exists("training_history.npz"):
+        history = np.load("training_history.npz")
         plt.figure(figsize=(8, 5))
         plt.plot(history["train_loss"], label="Train loss")
         plt.plot(history["test_loss"], label="Validation/test loss")
