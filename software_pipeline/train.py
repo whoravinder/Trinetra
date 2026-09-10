@@ -72,7 +72,8 @@ class UAVDataset(Dataset):
                 self.doppler_features = np.empty((n, *feats["doppler"].shape), dtype=np.float32)
             self.doppler_features[i] = feats["doppler"]
             self.doa_features[i] = feats["doa"]
-            self.estimated_doa[i] = feats["doa_deg"]
+            # Store normalized DOA because dashboard.py converts it back to degrees.
+            self.estimated_doa[i] = feats["doa_deg"] / DOA_MAX
 
     def __len__(self):
         return len(self.y)
