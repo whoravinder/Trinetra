@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 
+
 class ResidualBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+    def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=1)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, padding=1)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, stride, padding=1)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=1)
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.skip = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
@@ -14,8 +15,8 @@ class ResidualBlock1D(nn.Module):
         identity = self.skip(x)
         out = torch.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        out += identity
-        return torch.relu(out)
+        return torch.relu(out + identity)
+
 
 class ResidualBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3):
@@ -30,53 +31,73 @@ class ResidualBlock2D(nn.Module):
         identity = self.skip(x)
         out = torch.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        out += identity
-        return torch.relu(out)
+        return torch.relu(out + identity)
+
 
 class AttentionFusion(nn.Module):
-    def __init__(self, embed_dim, num_heads=4):
+    """Cross-modal attention over range, Doppler and DOA feature tokens."""
+
+    def __init__(self, embed_dim=128, num_heads=4):
         super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        self.norm = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
 
-    def forward(self, x):
-        attn_out, _ = self.attn(x, x, x)
-        return self.norm(x + attn_out)
+    def forward(self, tokens):
+        attn_out, _ = self.attn(tokens, tokens, tokens)
+        tokens = self.norm1(tokens + attn_out)
+        return self.norm2(tokens + self.ffn(tokens))
+
 
 class UAVEstimator(nn.Module):
+    """Multimodal UAS parameter estimator: range + Doppler + array DOA."""
+
     def __init__(self):
         super().__init__()
         self.range_cnn = nn.Sequential(
             ResidualBlock1D(1, 16),
             ResidualBlock1D(16, 32),
-            nn.AdaptiveAvgPool1d(16)
+            nn.AdaptiveAvgPool1d(16),
         )
         self.doppler_cnn = nn.Sequential(
             ResidualBlock2D(1, 16),
             ResidualBlock2D(16, 32),
-            nn.AdaptiveAvgPool2d((8, 8))
+            nn.AdaptiveAvgPool2d((8, 8)),
         )
-        self.doa_fc = nn.Sequential(
-            nn.Linear(180, 128),
+
+        # 181 bins correspond directly to the -90..90 degree, 1-degree grid.
+        self.range_proj = nn.Linear(32 * 16, 128)
+        self.doppler_proj = nn.Linear(32 * 8 * 8, 128)
+        self.doa_proj = nn.Sequential(
+            nn.Linear(181, 128),
             nn.ReLU(),
-            nn.Dropout(0.2)
+            nn.Dropout(0.1),
         )
-        self.fusion_proj = nn.Linear(32*16 + 32*8*8 + 128, 256)
-        self.attn = AttentionFusion(embed_dim=256, num_heads=4)
-        self.fc = nn.Sequential(
-            nn.Linear(256, 128), nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 3)
+
+        self.fusion = AttentionFusion(embed_dim=128, num_heads=4)
+        self.head = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3),
         )
 
     def forward(self, range_feat, doppler_feat, doa_feat):
-        r = self.range_cnn(range_feat.unsqueeze(1))
-        r = r.view(r.size(0), -1)
-        d = self.doppler_cnn(doppler_feat.unsqueeze(1))
-        d = d.view(d.size(0), -1)
-        doa = self.doa_fc(doa_feat)
-        fused = torch.cat([r, d, doa], dim=1)
-        fused = self.fusion_proj(fused).unsqueeze(1)
-        fused = self.attn(fused).squeeze(1)
-        return self.fc(fused)
+        r = self.range_cnn(range_feat.unsqueeze(1)).flatten(1)
+        d = self.doppler_cnn(doppler_feat.unsqueeze(1)).flatten(1)
+        r = self.range_proj(r)
+        d = self.doppler_proj(d)
+        doa = self.doa_proj(doa_feat)
+
+        # Three tokens make attention meaningful: each token represents one modality.
+        tokens = torch.stack([r, d, doa], dim=1)
+        fused = self.fusion(tokens).mean(dim=1)
+        return self.head(fused)
