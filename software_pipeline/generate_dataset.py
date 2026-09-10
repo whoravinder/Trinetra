@@ -4,7 +4,9 @@ import os
 from scipy.constants import c
 
 class ISACDatasetGenerator3GPP:
-    def __init__(self, carrier_freq=6e9, bandwidth=20e6, n_subcarriers=128, n_symbols=14, snr_db=20, n_clusters=10, scenario="UMi"):
+    def __init__(self, carrier_freq=6e9, bandwidth=20e6, n_subcarriers=128, n_symbols=14,
+                 snr_db=20, n_clusters=10, scenario="UMi", n_antennas=8,
+                 element_spacing=None):
         self.fc = carrier_freq
         self.bw = bandwidth
         self.n_subcarriers = n_subcarriers
@@ -12,6 +14,9 @@ class ISACDatasetGenerator3GPP:
         self.snr_db = snr_db
         self.n_clusters = n_clusters
         self.scenario = scenario
+        self.n_antennas = n_antennas
+        self.wavelength = c / self.fc
+        self.element_spacing = element_spacing if element_spacing is not None else self.wavelength / 2
 
     def generate_ofdm_symbol(self):
         data = np.random.choice([1, -1], size=self.n_subcarriers) + 1j*np.random.choice([1, -1], size=self.n_subcarriers)
@@ -51,27 +56,38 @@ class ISACDatasetGenerator3GPP:
             rx += np.sqrt(power) * doppler
         return rx
 
-    def apply_uav_channel(self, tx_signal, range_m, velocity_mps, doa_deg, uav_size="small"):
+    def apply_uav_array_channel(self, tx_signal, range_m, velocity_mps, doa_deg, uav_size="small"):
+        """Generate complex baseband signals across a ULA with angle-dependent phase."""
         rcs_factor = 1.0 if uav_size == "small" else 2.5
         clusters = self.generate_clusters(range_m, velocity_mps, doa_deg, is_target=True)
-        rx = self.apply_channel(tx_signal, clusters) * rcs_factor
-        return rx
+        n = len(tx_signal)
+        t = np.arange(n) / self.bw
+        rx = np.zeros((self.n_antennas, n), dtype=complex)
+        element_idx = np.arange(self.n_antennas)
 
-    def apply_background_channel(self, tx_signal, range_m):
-        los = np.random.rand() < self.los_probability(range_m)
-        clusters = self.generate_clusters(range_m, velocity_mps=0, doa_deg=0, is_target=False)
-        if los:
-            clusters.append((range_m/c, 0, 0, 1.0))
-        rx = self.apply_channel(tx_signal, clusters)
-        return rx
+        for delay, doppler_shift, angle, power in clusters:
+            delayed = np.roll(tx_signal, int(delay * self.bw))
+            doppler = delayed * np.exp(1j * 2 * np.pi * doppler_shift * t)
+            theta = np.deg2rad(angle)
+            steering = np.exp(-1j * 2 * np.pi * self.element_spacing * element_idx * np.sin(theta) / self.wavelength)
+            rx += np.sqrt(power) * steering[:, None] * doppler[None, :]
+
+        return rx * rcs_factor
 
     def apply_full_channel(self, tx_signal, range_m, velocity_mps, doa_deg, uav_size="small"):
-        target_rx = self.apply_uav_channel(tx_signal, range_m, velocity_mps, doa_deg, uav_size)
-        background_rx = self.apply_background_channel(tx_signal, range_m)
-        rx = target_rx + background_rx
+        target_rx = self.apply_uav_array_channel(tx_signal, range_m, velocity_mps, doa_deg, uav_size)
+
+        # Background is common to the array in this prototype. A future version can
+        # assign independent clutter angles and steering vectors to each cluster.
+        background_rx = self.apply_channel(tx_signal, self.generate_clusters(
+            range_m, velocity_mps=0, doa_deg=0, is_target=False))
+        rx = target_rx + background_rx[None, :]
+
         sig_power = np.mean(np.abs(rx)**2)
         noise_power = sig_power / (10**(self.snr_db/10))
-        noise = np.sqrt(noise_power/2) * (np.random.randn(len(rx)) + 1j*np.random.randn(len(rx)))
+        noise = np.sqrt(noise_power/2) * (
+            np.random.randn(*rx.shape) + 1j*np.random.randn(*rx.shape)
+        )
         return rx + noise
 
     def generate_sample(self, range_m, velocity_mps, doa_deg, uav_size="small"):
@@ -84,22 +100,22 @@ class ISACDatasetGenerator3GPP:
         for _ in range(n_samples):
             r = np.random.uniform(10, 500)
             v = np.random.uniform(0, 50)
-            a = np.random.uniform(-90, 90)
+            a = np.random.uniform(-80, 80)
             size = "small" if np.random.rand() < 0.5 else "large"
             rx, label = self.generate_sample(r, v, a, size)
             X.append(rx)
             y.append(label)
-        X = np.array(X, dtype=np.complex64)
+        X = np.array(X, dtype=np.complex64)  # [samples, antennas, time]
         y = np.array(y, dtype=np.float32)
         os.makedirs("datasets", exist_ok=True)
         path = os.path.join("datasets", out_file)
         with h5py.File(path, "w") as f:
             f.create_dataset("X", data=X)
             f.create_dataset("y", data=y)
-        print(f"Dataset generated: {path} with {n_samples} samples, scenario={self.scenario}")
+        print(f"Dataset generated: {path} with {n_samples} samples, scenario={self.scenario}, antennas={self.n_antennas}")
 
 if __name__ == "__main__":
     scenarios = ["UMi", "UMa", "RMa", "SMa"]
     for sc in scenarios:
-        gen = ISACDatasetGenerator3GPP(carrier_freq=6e9, scenario=sc)
+        gen = ISACDatasetGenerator3GPP(carrier_freq=6e9, scenario=sc, n_antennas=8)
         gen.build_dataset(n_samples=5000, out_file=f"adyant_isac_{sc}.h5")
