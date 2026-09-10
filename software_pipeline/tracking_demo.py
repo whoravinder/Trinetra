@@ -19,7 +19,7 @@ DOA_MAX = 90.0
 
 
 def make_trajectory(n_frames=N_FRAMES, dt=DT):
-    """Create one smooth 2-D UAV trajectory and derive polar measurements."""
+    """Create one smooth 2-D UAV trajectory and derive polar states."""
     position = np.array([350.0, -200.0], dtype=float)
     velocity = np.array([10.0, 10.0], dtype=float)
     states = []
@@ -55,7 +55,7 @@ def main():
     filtered = []
 
     with torch.no_grad():
-        for k, (true_range, true_velocity, true_bearing) in enumerate(true_states):
+        for true_range, true_velocity, true_bearing in true_states:
             tx, rx, _ = generator.generate_sample(
                 float(true_range), float(true_velocity), float(true_bearing)
             )
@@ -76,26 +76,21 @@ def main():
     filtered = np.asarray(filtered)
     true_states = np.asarray(true_states)
 
-    df = np.column_stack([
-        np.arange(N_FRAMES),
-        true_states,
-        measurements,
-        filtered,
-    ])
+    data = np.column_stack([np.arange(N_FRAMES), true_states, measurements, filtered])
     np.savetxt(
         os.path.join(OUTPUT_DIR, "tracking_demo.csv"),
-        df,
-        delimiter=",","
-        header="frame,true_range_m,true_velocity_mps,true_bearing_deg,measured_range_m,measured_velocity_mps,measured_bearing_deg,filtered_range_m,filtered_velocity_mps,filtered_bearing_deg",
+        data,
+        delimiter=",",
+        header=(
+            "frame,true_range_m,true_velocity_mps,true_bearing_deg,"
+            "measured_range_m,measured_velocity_mps,measured_bearing_deg,"
+            "filtered_range_m,filtered_velocity_mps,filtered_bearing_deg"
+        ),
         comments="",
     )
 
     fig, axs = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
-    labels = [
-        ("Range (m)", 0),
-        ("Radial velocity (m/s)", 1),
-        ("Bearing (deg)", 2),
-    ]
+    labels = [("Range (m)", 0), ("Radial velocity (m/s)", 1), ("Bearing (deg)", 2)]
     for ax, (ylabel, idx) in zip(axs, labels):
         ax.plot(true_states[:, idx], label="True")
         ax.plot(measurements[:, idx], ".--", markersize=3, alpha=0.55, label="Neural measurement")
@@ -133,14 +128,14 @@ def main():
     plt.show()
 
     print("\n=== Trinetra Temporal Tracking Demo ===")
-    print(f"Frames                  : {N_FRAMES}")
-    print(f"Frame interval          : {DT:.2f} s")
-    print(f"Range measurement MAE   : {np.mean(np.abs(measurements[:,0] - true_states[:,0])):.2f} m")
-    print(f"Range filtered MAE      : {np.mean(np.abs(filtered[:,0] - true_states[:,0])):.2f} m")
-    print(f"Velocity measurement MAE: {np.mean(np.abs(measurements[:,1] - true_states[:,1])):.2f} m/s")
-    print(f"Velocity filtered MAE   : {np.mean(np.abs(filtered[:,1] - true_states[:,1])):.2f} m/s")
-    print(f"Bearing measurement MAE : {np.mean(np.abs(measurements[:,2] - true_states[:,2])):.2f} deg")
-    print(f"Bearing filtered MAE    : {np.mean(np.abs(filtered[:,2] - true_states[:,2])):.2f} deg")
+    print(f"Frames                   : {N_FRAMES}")
+    print(f"Frame interval           : {DT:.2f} s")
+    print(f"Range measurement MAE    : {np.mean(np.abs(measurements[:, 0] - true_states[:, 0])):.2f} m")
+    print(f"Range filtered MAE       : {np.mean(np.abs(filtered[:, 0] - true_states[:, 0])):.2f} m")
+    print(f"Velocity measurement MAE : {np.mean(np.abs(measurements[:, 1] - true_states[:, 1])):.2f} m/s")
+    print(f"Velocity filtered MAE    : {np.mean(np.abs(filtered[:, 1] - true_states[:, 1])):.2f} m/s")
+    print(f"Bearing measurement MAE  : {np.mean(np.abs(measurements[:, 2] - true_states[:, 2])):.2f} deg")
+    print(f"Bearing filtered MAE     : {np.mean(np.abs(filtered[:, 2] - true_states[:, 2])):.2f} deg")
     print(f"Saved: {OUTPUT_DIR}/tracking_demo.csv")
     print(f"Saved: {OUTPUT_DIR}/tracking_timeseries.png")
     print(f"Saved: {OUTPUT_DIR}/tracking_trajectory.png")
